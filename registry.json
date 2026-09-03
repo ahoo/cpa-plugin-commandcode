@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "plugins": [
+    {
+      "id": "commandcode",
+      "name": "CommandCode Provider",
+      "description": "Native commandcode.ai provider: routes DeepSeek/GLM models through api.commandcode.ai with reasoning/reasoning_details normalized to reasoning_content, so /v1/messages renders thinking blocks.",
+      "author": "ahoo",
+      "version": "0.1.0",
+      "repository": "https://github.com/ahoo/cpa-plugin-commandcode",
+      "homepage": "https://github.com/ahoo/cpa-plugin-commandcode",
+      "license": "MIT",
+      "tags": [
+        "Provider",
+        "commandcode",
+        "deepseek",
+        "reasoning"
+      ]
+    }
+  ]
+}
