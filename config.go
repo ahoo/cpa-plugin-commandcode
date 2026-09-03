@@ -17,9 +17,27 @@ type pluginConfig struct {
 	Models []string `yaml:"models"`
 	// BaseURL overrides the upstream endpoint root (tests, mirrors).
 	BaseURL string `yaml:"base_url"`
-	// APIKey pins a static key; empty means "use the host-selected auth's
-	// api_key attribute" (normal path: host picks a cmd-订阅 entry).
+	// APIKey pins a single static key (v0.1.x compatible). Prefer APIKeys.
+	// NOTE: on the ModelRouter path the host passes a nil auth, so the key
+	// MUST come from plugin config, not host auth selection.
 	APIKey string `yaml:"api_key"`
+	// APIKeys is the v0.2.0 multi-key pool: weighted selection with
+	// per-key proxy and failover retry. When non-empty it wins over APIKey.
+	APIKeys []APIKeyEntry `yaml:"api_keys"`
+}
+
+// APIKeyEntry is one pool member: key + weight + optional per-key proxy.
+type APIKeyEntry struct {
+	Key      string `yaml:"key"`
+	Weight   int    `yaml:"weight"`
+	ProxyURL string `yaml:"proxy_url"`
+}
+
+func (en APIKeyEntry) normWeight() int {
+	if en.Weight <= 0 {
+		return 1
+	}
+	return en.Weight
 }
 
 func parseConfig(raw []byte) *pluginConfig {

@@ -32,6 +32,10 @@ const (
 	upstreamBaseURL = "https://api.commandcode.ai/provider/v1"
 )
 
+// pluginVersion tracks the release; cmd/commandcode/abi.go carries its own
+// copy for registration metadata (injected via ldflags at release time).
+const pluginVersion = "0.2.0"
+
 // CommandCodePlugin wires model metadata, routing, translation and execution.
 type CommandCodePlugin struct {
 	models     *ModelProvider
@@ -57,7 +61,7 @@ func Build(configYAML []byte) (pluginapi.Plugin, *CommandCodePlugin) {
 	desc := pluginapi.Plugin{
 		Metadata: pluginapi.Metadata{
 			Name:             "CommandCode Provider",
-			Version:          "0.1.0",
+			Version:          pluginVersion,
 			Author:           "cpa-admin",
 			GitHubRepository: "https://github.com/ahoo/cpa-plugin-commandcode",
 		},

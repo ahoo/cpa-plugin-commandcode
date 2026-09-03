@@ -14,45 +14,37 @@ import (
 
 // Executor forwards OpenAI chat-completions payloads to commandcode and
 // normalizes responses back into standard OpenAI shape (reasoning backfill).
-// All upstream I/O goes through req.HTTPClient so host proxy policy,
-// per-auth proxy-url and request-log capture keep working.
+//
+// v0.2.0: requests go through the weighted multi-key pool. Members without
+// proxy_url use the host HTTP client (host proxy policy + request-log
+// preserved); members with proxy_url use a self-built transport (host
+// request-log cannot capture those). Failover retries 429/5xx/transport
+// errors on the next pool member.
 type Executor struct {
 	cfg        *pluginConfig
 	translator *Translator
+	keypool    *pool
 }
 
 func NewExecutor(cfg *pluginConfig, t *Translator) *Executor {
 	if t == nil {
 		t = NewTranslator(cfg)
 	}
-	return &Executor{cfg: cfg, translator: t}
+	return &Executor{cfg: cfg, translator: t, keypool: newPool()}
 }
 
 func (e *Executor) Identifier() string { return Provider }
 
-// apiKey resolves credentials. NOTE: on the ModelRouter path the host
-// calls the executor with a nil auth (executor_route.go passes
-// (*coreauth.Auth)(nil)), so AuthAttributes/AuthMetadata are always empty
-// here. The key MUST come from plugins.configs.<id>.api_key (or the
-// host-level proxy default is irrelevant — commandcode needs a Bearer key).
+// apiKey keeps the v0.1.x single-key resolution for translator paths and
+// error messages. Live execution uses the pool (members method).
 func apiKey(cfg *pluginConfig, req pluginapi.ExecutorRequest) string {
-	if cfg != nil && strings.TrimSpace(cfg.APIKey) != "" {
-		return strings.TrimSpace(cfg.APIKey)
-	}
-	if req.AuthAttributes != nil {
-		if k := strings.TrimSpace(req.AuthAttributes["api_key"]); k != "" {
-			return k
-		}
-	}
-	if req.AuthMetadata != nil {
-		if k, ok := req.AuthMetadata["api_key"].(string); ok && strings.TrimSpace(k) != "" {
-			return strings.TrimSpace(k)
-		}
+	if ms := cfg.members(req); len(ms) > 0 {
+		return strings.TrimSpace(ms[0].Key)
 	}
 	return ""
 }
 
-const missingKeyMsg = "commandcode executor: missing api key (router path passes nil auth; set plugins.configs.commandcode.api_key in config.yaml)"
+const missingKeyMsg = "commandcode executor: missing api key (router path passes nil auth; set plugins.configs.commandcode.api_key or api_keys in config.yaml)"
 
 func (e *Executor) endpoint() string {
 	return strings.TrimSuffix(e.cfg.baseURL(), "/") + "/chat/completions"
@@ -105,58 +97,86 @@ func upstreamHeaders(apiKey string, stream bool) http.Header {
 	return h
 }
 
-// Execute performs a non-streaming chat completion.
+// Execute performs a non-streaming chat completion, failing over across
+// pool members on retryable errors (transport error, 429, 5xx).
 func (e *Executor) Execute(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorResponse, error) {
-	if req.HTTPClient == nil {
-		return pluginapi.ExecutorResponse{}, fmt.Errorf("commandcode executor: host HTTP client is required")
-	}
-	key := apiKey(e.cfg, req)
-	if key == "" {
+	members := e.cfg.members(req)
+	if len(members) == 0 {
 		return pluginapi.ExecutorResponse{}, statusError{statusCode: http.StatusUnauthorized, msg: missingKeyMsg}
 	}
 	body := e.buildUpstreamBody(req.Model, req.Payload, false)
-	resp, err := req.HTTPClient.Do(ctx, pluginapi.HTTPRequest{
-		Method:  http.MethodPost,
-		URL:     e.endpoint(),
-		Headers: upstreamHeaders(key, false),
-		Body:    body,
-	})
-	if err != nil {
-		return pluginapi.ExecutorResponse{}, err
+	var lastErr error
+	for _, idx := range e.keypool.order(members) {
+		m := members[idx]
+		d, err := e.keypool.clientFor(idx, m, req.HTTPClient)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		status, headers, respBody, err := d.do(ctx, e.endpoint(), upstreamHeaders(strings.TrimSpace(m.Key), false), body)
+		if err != nil {
+			lastErr = err
+			if retryable(0, err) && ctx.Err() == nil {
+				continue
+			}
+			return pluginapi.ExecutorResponse{}, err
+		}
+		if status < 200 || status >= 300 {
+			lastErr = statusError{statusCode: status, body: respBody}
+			if retryable(status, nil) && ctx.Err() == nil {
+				continue
+			}
+			return pluginapi.ExecutorResponse{}, lastErr
+		}
+		fixed, _ := mapReasoningBody(respBody)
+		return pluginapi.ExecutorResponse{Payload: fixed, Headers: headers}, nil
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return pluginapi.ExecutorResponse{}, statusError{statusCode: resp.StatusCode, body: resp.Body}
+	if lastErr != nil {
+		return pluginapi.ExecutorResponse{}, lastErr
 	}
-	fixed, _ := mapReasoningBody(resp.Body)
-	return pluginapi.ExecutorResponse{Payload: fixed, Headers: resp.Headers}, nil
+	return pluginapi.ExecutorResponse{}, statusError{statusCode: http.StatusBadGateway, msg: "commandcode executor: all pool members failed"}
 }
 
 // ExecuteStream performs a streaming chat completion, normalizing each SSE
-// data line before handing chunks back. The host pumps them downstream via
-// host.stream.emit; returning converted (not raw) chunks is supported —
-// gemini-cli's convertHTTPChunks does the same unwrap on this path.
+// line into bare JSON before handing chunks back (the host adds "data: "
+// framing downstream). Failover applies only before the first upstream byte:
+// once a 2xx stream is established, mid-stream errors propagate (already
+// delivered bytes cannot be rolled back).
 func (e *Executor) ExecuteStream(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
-	if req.HTTPClient == nil {
-		return pluginapi.ExecutorStreamResponse{}, fmt.Errorf("commandcode executor: host HTTP client is required")
-	}
-	key := apiKey(e.cfg, req)
-	if key == "" {
+	members := e.cfg.members(req)
+	if len(members) == 0 {
 		return pluginapi.ExecutorStreamResponse{}, statusError{statusCode: http.StatusUnauthorized, msg: missingKeyMsg}
 	}
 	body := e.buildUpstreamBody(req.Model, req.Payload, true)
-	resp, err := req.HTTPClient.DoStream(ctx, pluginapi.HTTPRequest{
-		Method:  http.MethodPost,
-		URL:     e.endpoint(),
-		Headers: upstreamHeaders(key, true),
-		Body:    body,
-	})
-	if err != nil {
-		return pluginapi.ExecutorStreamResponse{}, err
+	var lastErr error
+	for _, idx := range e.keypool.order(members) {
+		m := members[idx]
+		d, err := e.keypool.clientFor(idx, m, req.HTTPClient)
+		if err != nil {
+			lastErr = err
+			continue
+		}
+		status, headers, chunks, err := d.doStream(ctx, e.endpoint(), upstreamHeaders(strings.TrimSpace(m.Key), true), body)
+		if err != nil {
+			lastErr = err
+			if retryable(0, err) && ctx.Err() == nil {
+				continue
+			}
+			return pluginapi.ExecutorStreamResponse{}, err
+		}
+		if status < 200 || status >= 300 {
+			lastErr = statusError{statusCode: status, body: readStreamErrorBody(ctx, chunks)}
+			if retryable(status, nil) && ctx.Err() == nil {
+				continue
+			}
+			return pluginapi.ExecutorStreamResponse{}, lastErr
+		}
+		return pluginapi.ExecutorStreamResponse{Headers: headers, Chunks: convertChunks(ctx, chunks)}, nil
 	}
-	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
-		return pluginapi.ExecutorStreamResponse{}, statusError{statusCode: resp.StatusCode, body: readStreamErrorBody(ctx, resp.Chunks)}
+	if lastErr != nil {
+		return pluginapi.ExecutorStreamResponse{}, lastErr
 	}
-	return pluginapi.ExecutorStreamResponse{Headers: resp.Headers, Chunks: convertChunks(ctx, resp.Chunks)}, nil
+	return pluginapi.ExecutorStreamResponse{}, statusError{statusCode: http.StatusBadGateway, msg: "commandcode executor: all pool members failed"}
 }
 
 // convertChunks normalizes each upstream SSE data payload (reasoning
@@ -298,45 +318,42 @@ func (e *Executor) CountTokens(ctx context.Context, req pluginapi.ExecutorReques
 	return pluginapi.ExecutorResponse{Payload: raw}, nil
 }
 
-// HttpRequest bridges raw executor HTTP through the host client with the
-// resolved api key injected.
+// HttpRequest bridges raw executor HTTP through the pool: first member's
+// transport (pool order is stable per call) with the resolved api key
+// injected when the caller did not set Authorization.
 func (e *Executor) HttpRequest(ctx context.Context, req pluginapi.ExecutorHTTPRequest) (pluginapi.ExecutorHTTPResponse, error) {
-	if req.HTTPClient == nil {
-		return pluginapi.ExecutorHTTPResponse{}, fmt.Errorf("commandcode executor: host HTTP client is required")
-	}
 	if strings.TrimSpace(req.URL) == "" {
 		return pluginapi.ExecutorHTTPResponse{}, fmt.Errorf("commandcode executor: request URL is required")
-	}
-	method := req.Method
-	if method == "" {
-		method = http.MethodPost
 	}
 	headers := req.Headers.Clone()
 	if headers == nil {
 		headers = http.Header{}
 	}
-	if headers.Get("Authorization") == "" {
-		key := ""
-		if e.cfg != nil && strings.TrimSpace(e.cfg.APIKey) != "" {
-			key = strings.TrimSpace(e.cfg.APIKey)
-		} else if req.Attributes != nil {
-			key = strings.TrimSpace(req.Attributes["api_key"])
-		}
-		if key == "" {
-			return pluginapi.ExecutorHTTPResponse{}, statusError{statusCode: http.StatusUnauthorized, msg: missingKeyMsg}
-		}
-		headers.Set("Authorization", "Bearer "+key)
+	members := e.cfg.members(poolReqFromHTTP(req))
+	if len(members) == 0 && headers.Get("Authorization") == "" {
+		return pluginapi.ExecutorHTTPResponse{}, statusError{statusCode: http.StatusUnauthorized, msg: missingKeyMsg}
 	}
-	resp, err := req.HTTPClient.Do(ctx, pluginapi.HTTPRequest{
-		Method:  method,
-		URL:     req.URL,
-		Headers: headers,
-		Body:    req.Body,
-	})
+	if headers.Get("Authorization") == "" {
+		headers.Set("Authorization", "Bearer "+strings.TrimSpace(members[0].Key))
+	}
+	var d doer
+	if len(members) > 0 {
+		var err error
+		d, err = e.keypool.clientFor(0, members[0], req.HTTPClient)
+		if err != nil {
+			return pluginapi.ExecutorHTTPResponse{}, err
+		}
+	} else {
+		if req.HTTPClient == nil {
+			return pluginapi.ExecutorHTTPResponse{}, fmt.Errorf("commandcode executor: host HTTP client is required")
+		}
+		d = hostDoer{client: req.HTTPClient}
+	}
+	status, respHeaders, respBody, err := d.do(ctx, strings.TrimSpace(req.URL), headers, req.Body)
 	if err != nil {
 		return pluginapi.ExecutorHTTPResponse{}, err
 	}
-	return pluginapi.ExecutorHTTPResponse{StatusCode: resp.StatusCode, Headers: resp.Headers, Body: resp.Body}, nil
+	return pluginapi.ExecutorHTTPResponse{StatusCode: status, Headers: respHeaders, Body: respBody}, nil
 }
 
 // statusError carries an upstream HTTP status back to the host (the ABI

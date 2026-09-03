@@ -26,7 +26,7 @@ docker run --rm \
     chmod -R u+w /src 2>/dev/null || true
     go vet ./...
     go test ./...
-    go build -buildmode=c-shared -o /out/'"${PLUGIN_NAME}"'-v'"${PLUGIN_VERSION}"'.so ./cmd/commandcode
+    go build -buildvcs=false -buildmode=c-shared -o /out/'"${PLUGIN_NAME}"'-v'"${PLUGIN_VERSION}"'.so ./cmd/commandcode
     rm -f /out/'"${PLUGIN_NAME}"'-v'"${PLUGIN_VERSION}"'.h
   '
 

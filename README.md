@@ -44,12 +44,24 @@ plugins:
     commandcode:
       enabled: true
       priority: 100
-      api_key: user_YOUR_COMMANDCODE_KEY
+      api_keys:
+        - key: user_YOUR_FIRST_KEY
+          weight: 10
+          proxy_url: http://127.0.0.1:18080   # optional per-key proxy
+        - key: user_YOUR_SECOND_KEY
+          weight: 5
+          # no proxy_url -> host HTTP client (host proxy policy + request-log)
 ```
 
+Legacy single-key form (`api_key: user_...`) still works and equals a
+one-member pool. Weighted-random selection per request; transport errors,
+401, 429 and 5xx fail over to the next member. Members with `proxy_url`
+(http/https/socks5) use a self-built transport — host request-log cannot
+capture those outbound calls.
+
 On the ModelRouter path the host passes a nil auth to the executor, so the
-key **must** come from `plugins.configs.commandcode.api_key` (the same key
-as the `cmd-订阅` openai-compatibility entry). Then restart:
+key **must** come from `plugins.configs.commandcode.api_keys` (or legacy
+`api_key`). Then restart:
 
 ```bash
 docker restart cli-proxy-api

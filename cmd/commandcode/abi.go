@@ -65,6 +65,10 @@ import (
 	plug "github.com/ahoo/cpa-plugin-commandcode"
 )
 
+// pluginVersion is overridden at release build time:
+// go build -ldflags "-X main.pluginVersion=0.2.0"
+var pluginVersion = "0.2.0"
+
 var abiState = struct {
 	sync.RWMutex
 	host   *C.cliproxy_host_api
@@ -310,6 +314,7 @@ func handleRegister(request []byte) ([]byte, error) {
 	if p == nil {
 		return nil, fmt.Errorf("commandcode plugin registration returned invalid capabilities")
 	}
+	built.Metadata.Version = pluginVersion
 	abiState.Lock()
 	abiState.plugin = p
 	abiState.Unlock()
