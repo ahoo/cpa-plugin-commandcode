@@ -18,6 +18,7 @@ type Router struct {
 func NewRouter(cfg *pluginConfig) *Router { return &Router{cfg: cfg} }
 
 func (r *Router) owned(req pluginapi.ModelRouteRequest) bool {
+	r.cfg.ensureIndexes()
 	set := r.cfg.modelSet()
 	for _, candidate := range []string{req.RequestedModel, modelFromBody(req.Body)} {
 		if candidate == "" {

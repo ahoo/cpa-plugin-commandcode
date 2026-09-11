@@ -32,7 +32,7 @@ func (t *Translator) TranslateRequest(ctx context.Context, req pluginapi.Request
 	}
 	switch from {
 	case "", "openai", "commandcode":
-		return pluginapi.PayloadResponse{Body: normalizeRequestModel(req.Model, req.Body)}, nil
+		return pluginapi.PayloadResponse{Body: t.normalizeRequestModel(req.Model, req.Body)}, nil
 	default:
 		return pluginapi.PayloadResponse{Body: append([]byte(nil), req.Body...)}, nil
 	}
@@ -56,40 +56,33 @@ func (t *Translator) TranslateResponse(ctx context.Context, req pluginapi.Respon
 	return pluginapi.PayloadResponse{Body: fixed}, nil
 }
 
-// normalizeRequestModel ensures the outbound model field carries the upstream
-// name (e.g. "deepseek/deepseek-v4-flash") rather than a host alias, so
-// commandcode routes to the right weights even if alias stripping drifted.
-func normalizeRequestModel(model string, body []byte) []byte {
+// normalizeRequestModel rewrites the outbound model to the vendor's name.
+//
+// This plugin runs its own executor against its own base URL, so the host's
+// openai-compatibility alias table never applies to the requests it sends: a
+// bare alias reaches commandcode unchanged and is rejected with
+// `Model "deepseek-flash" is not supported on this endpoint`. The alias ->
+// vendor-name mapping therefore has to happen here, driven by the configured
+// `models:` list.
+//
+// The comparison is literal, not normalized. A vendor name like
+// "z-ai/glm-5.3-flash" and the alias "glm-5.3-flash" normalize to the same
+// string, but the prefix is significant upstream -- treating them as equal
+// would skip the rewrite and send a name the vendor does not serve.
+func (t *Translator) normalizeRequestModel(model string, body []byte) []byte {
 	if len(body) == 0 {
 		return body
 	}
-	upstream := upstreamModelName(model)
-	if upstream == "" {
+	t.cfg.ensureIndexes()
+	vendorName := t.cfg.upstreamName(model)
+	if vendorName == "" {
 		return body
 	}
-	current := gjsonGetString(body, "model")
-	if normalizeModel(current) == normalizeModel(upstream) {
+	if current := strings.TrimSpace(gjsonGetString(body, "model")); current == vendorName {
 		return body
 	}
-	if out, err := sjsonSetString(body, "model", upstream); err == nil {
+	if out, err := sjsonSetString(body, "model", vendorName); err == nil {
 		return out
 	}
 	return body
-}
-
-// upstreamModelName maps a host-facing alias back to the commandcode model id.
-func upstreamModelName(model string) string {
-	switch normalizeModel(model) {
-	case "deepseek-flash", "deepseek-v4-flash":
-		return "deepseek/deepseek-v4-flash"
-	case "deepseek-vision", "deepseek-v4-flash-vision-exp":
-		return "deepseek/deepseek-v4-flash-vision-exp"
-	case "glm-5.3-flash", "glm-5-3-flash":
-		return "z-ai/glm-5.3-flash"
-	}
-	// Already an upstream-qualified name? keep verbatim.
-	if strings.Contains(model, "/") {
-		return strings.TrimSpace(model)
-	}
-	return ""
 }

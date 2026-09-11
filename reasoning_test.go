@@ -7,39 +7,39 @@ import (
 
 func TestMapReasoningBody(t *testing.T) {
 	cases := []struct {
-		name      string
-		in        string
-		wantRC    string
+		name       string
+		in         string
+		wantRC     string
 		wantChange bool
 	}{
 		{
-			name: "details array backfilled",
-			in: `{"choices":[{"delta":{"reasoning":"17","reasoning_details":[{"text":"17"}],"content":"hi"}}]}`,
-			wantRC: "17",
+			name:       "details array backfilled",
+			in:         `{"choices":[{"delta":{"reasoning":"17","reasoning_details":[{"text":"17"}],"content":"hi"}}]}`,
+			wantRC:     "17",
 			wantChange: true,
 		},
 		{
-			name: "plain reasoning string backfilled",
-			in: `{"choices":[{"message":{"reasoning":"think-think","content":"done"}}]}`,
-			wantRC: "think-think",
+			name:       "plain reasoning string backfilled",
+			in:         `{"choices":[{"message":{"reasoning":"think-think","content":"done"}}]}`,
+			wantRC:     "think-think",
 			wantChange: true,
 		},
 		{
-			name: "existing reasoning_content untouched",
-			in: `{"choices":[{"delta":{"reasoning":"x","reasoning_content":"keep","content":"hi"}}]}`,
-			wantRC: "keep",
+			name:       "existing reasoning_content untouched",
+			in:         `{"choices":[{"delta":{"reasoning":"x","reasoning_content":"keep","content":"hi"}}]}`,
+			wantRC:     "keep",
 			wantChange: false,
 		},
 		{
-			name: "no reasoning fields passthrough",
-			in: `{"choices":[{"delta":{"content":"hi"}}]}`,
-			wantRC: "",
+			name:       "no reasoning fields passthrough",
+			in:         `{"choices":[{"delta":{"content":"hi"}}]}`,
+			wantRC:     "",
 			wantChange: false,
 		},
 		{
-			name: "non-streaming message shape",
-			in: `{"id":"x","choices":[{"message":{"role":"assistant","reasoning":"deep","reasoning_details":[{"text":"deep"}],"content":"out"}}],"usage":{}}`,
-			wantRC: "deep",
+			name:       "non-streaming message shape",
+			in:         `{"id":"x","choices":[{"message":{"role":"assistant","reasoning":"deep","reasoning_details":[{"text":"deep"}],"content":"out"}}],"usage":{}}`,
+			wantRC:     "deep",
 			wantChange: true,
 		},
 	}
@@ -115,25 +115,58 @@ func TestNormalizeStreamBytes(t *testing.T) {
 	}
 }
 
-func TestUpstreamModelName(t *testing.T) {
-	for in, want := range map[string]string{
-		"deepseek-flash":              "deepseek/deepseek-v4-flash",
-		"deepseek-v4-flash":           "deepseek/deepseek-v4-flash",
-		"deepseek/deepseek-v4-flash":  "deepseek/deepseek-v4-flash",
-		"deepseek-vision":             "deepseek/deepseek-v4-flash-vision-exp",
-		"glm-5.3-flash":               "z-ai/glm-5.3-flash",
-		"z-ai/glm-5.3-flash":          "z-ai/glm-5.3-flash",
-		"something/else-entirely":     "something/else-entirely",
+// The alias MUST become the vendor's fully-qualified name: this plugin owns its
+// executor and base URL, so the host's alias table never applies to its
+// requests, and commandcode rejects a bare alias outright.
+func TestDefaultMappingRewritesAliasToUpstream(t *testing.T) {
+	tr := NewTranslator(&pluginConfig{})
+	for alias, want := range map[string]string{
+		"deepseek-flash": "deepseek/deepseek-v4.1-flash",
+		"glm-5.3-flash":  "z-ai/glm-5.3-flash",
 	} {
-		if got := upstreamModelName(in); got != want {
-			t.Errorf("upstreamModelName(%q)=%q want %q", in, got, want)
+		body := []byte(`{"model":"` + alias + `"}`)
+		got := tr.normalizeRequestModel(alias, body)
+		if model := gjsonGetString(got, "model"); model != want {
+			t.Errorf("model=%q, want %q", model, want)
 		}
+	}
+}
+
+// Overriding the mapping must take effect without any code change, so the
+// vendor renaming a model is a configuration edit.
+func TestConfiguredMappingOverridesDefault(t *testing.T) {
+	cfg := parseConfig([]byte("models:\n  - alias: deepseek-flash\n    name: deepseek/deepseek-v9.9-flash\n"))
+	tr := NewTranslator(cfg)
+	got := tr.normalizeRequestModel("deepseek-flash", []byte(`{"model":"deepseek-flash"}`))
+	if model := gjsonGetString(got, "model"); model != "deepseek/deepseek-v9.9-flash" {
+		t.Fatalf("model=%q, want the configured upstream name", model)
+	}
+}
+
+// An entry with no upstream claims the alias but forwards it verbatim, which is
+// what a host-routed alias needs.
+func TestEntryWithoutUpstreamForwardsVerbatim(t *testing.T) {
+	cfg := parseConfig([]byte("models:\n  - deepseek-flash\n"))
+	tr := NewTranslator(cfg)
+	body := []byte(`{"model":"deepseek-flash"}`)
+	if got := tr.normalizeRequestModel("deepseek-flash", body); string(got) != string(body) {
+		t.Fatalf("model was rewritten: %s", got)
+	}
+	r := NewRouter(cfg)
+	resp, _ := r.RouteModel(t.Context(), requestWithModel("deepseek-flash"))
+	if !resp.Handled {
+		t.Fatal("entry should still claim the model")
 	}
 }
 
 func TestRouterOwned(t *testing.T) {
 	r := NewRouter(&pluginConfig{})
-	for _, m := range []string{"deepseek-flash", "deepseek-vision", "glm-5.3-flash", "deepseek/deepseek-v4-flash", "commandcode/deepseek-v4-flash"} {
+	for _, m := range []string{
+		"deepseek-flash",
+		"deepseek-flash(high)",       // thinking suffix
+		"commandcode/deepseek-flash", // provider prefix
+		"glm-5.3-flash",
+	} {
 		resp, err := r.RouteModel(t.Context(), requestWithModel(m))
 		if err != nil {
 			t.Fatal(err)
@@ -145,5 +178,28 @@ func TestRouterOwned(t *testing.T) {
 	resp, _ := r.RouteModel(t.Context(), requestWithModel("gpt-5"))
 	if resp.Handled {
 		t.Errorf("unrelated model hijacked")
+	}
+}
+
+// Both spellings of a mapped model are claimed: the client alias and the vendor
+// name, so a request arriving either way reaches this executor.
+func TestRouterOwnsConfiguredNames(t *testing.T) {
+	cfg := parseConfig([]byte("models:\n  - alias: fast\n    name: deepseek/deepseek-v4.1-flash\n"))
+	r := NewRouter(cfg)
+	for _, m := range []string{"fast", "deepseek/deepseek-v4.1-flash"} {
+		resp, _ := r.RouteModel(t.Context(), requestWithModel(m))
+		if !resp.Handled {
+			t.Errorf("model %q not routed", m)
+		}
+	}
+}
+
+// The vendor treats a path prefix as significant, so a name that normalizes to
+// the same string as its alias must still be rewritten verbatim.
+func TestPrefixSignificantVendorNameIsRewritten(t *testing.T) {
+	tr := NewTranslator(&pluginConfig{})
+	got := tr.normalizeRequestModel("glm-5.3-flash", []byte(`{"model":"glm-5.3-flash"}`))
+	if model := gjsonGetString(got, "model"); model != "z-ai/glm-5.3-flash" {
+		t.Fatalf("model=%q, want the prefixed vendor name", model)
 	}
 }

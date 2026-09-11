@@ -18,22 +18,42 @@ without touching host code.
 
 ## Capabilities
 
-- `model_provider` — static models: `commandcode/deepseek-v4-flash`,
-  `commandcode/deepseek-v4-flash-vision-exp`, `commandcode/glm-5.3-flash`
-  (namespaced so they never collide with the native openai-compatibility
-  channel; the ABI has no live `/v1/models` discovery).
-- `model_router` — hijacks `deepseek-flash`, `deepseek-vision`,
-  `glm-5.3-flash` (and upstream-qualified names) to this executor.
+- `model_provider` — advertises the configured models under the
+  `commandcode/` namespace (so they never collide with the native
+  openai-compatibility channel; the ABI has no live `/v1/models` discovery).
+- `model_router` — hijacks the configured client aliases (`deepseek-flash`,
+  `deepseek-vision`, `glm-5.3-flash` by default) to this executor.
 - `executor` — POSTs to `/chat/completions` through the host HTTP client
   (proxy policy + request-log preserved); backfills `reasoning_content` on
   every non-streaming response and every SSE data line.
-- `request_translator` / `response_translator` — alias→upstream model-name
-  normalization and the same reasoning backfill for translated edges.
+- `request_translator` / `response_translator` — the same reasoning backfill
+  for translated edges.
 
-Streaming chunks are emitted as bare JSON — the host adds `data: ` framing
-downstream. Empty lines and upstream `[DONE]` are swallowed (the host emits
-its own stream tail). A line buffer reassembles SSE lines split across the
-host's 32KB raw reads.
+## Model mapping
+
+The plugin runs its own executor against `api.commandcode.ai`, so the host's
+`openai-compatibility` alias table does not apply to its requests. commandcode
+only accepts fully-qualified vendor names, and rejects a bare alias with
+`Model "deepseek-flash" is not supported on this endpoint` — so the mapping has
+to happen here.
+
+Fields match the host's alias convention: `name` is what goes upstream,
+`alias` is what clients send.
+
+```yaml
+    commandcode:
+      models:
+        - alias: deepseek-flash
+          name: deepseek/deepseek-v4.1-flash
+        - alias: glm-5.3-flash
+          name: z-ai/glm-5.3-flash
+          display_name: "GLM 5.3 Flash"     # optional label
+```
+
+When the vendor renames a model, edit this list — no code change. Omitting
+`models` entirely uses the built-in defaults (those two entries).
+An entry with no `name` claims the alias but forwards it verbatim, which is
+only correct for aliases the host resolves itself.
 
 ## Install
 
@@ -73,9 +93,13 @@ Optional overrides:
 
 ```yaml
     commandcode:
-      models: ["deepseek/deepseek-v4-flash", "my-alias"]  # default: 3 built-ins + aliases
+      # Default: the three mappings shown under "Model mapping".
+      models:
+        - alias: my-alias
+          name: vendor/model-name
       base_url: https://mirror.example.com/provider/v1    # default: https://api.commandcode.ai/provider/v1
 ```
+
 
 ## Build
 

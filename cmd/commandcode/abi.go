@@ -66,8 +66,8 @@ import (
 )
 
 // pluginVersion is overridden at release build time:
-// go build -ldflags "-X main.pluginVersion=0.2.0"
-var pluginVersion = "0.2.0"
+// go build -ldflags "-X main.pluginVersion=0.3.0"
+var pluginVersion = "0.3.0"
 
 var abiState = struct {
 	sync.RWMutex

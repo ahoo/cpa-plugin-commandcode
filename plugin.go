@@ -34,7 +34,7 @@ const (
 
 // pluginVersion tracks the release; cmd/commandcode/abi.go carries its own
 // copy for registration metadata (injected via ldflags at release time).
-const pluginVersion = "0.2.0"
+const pluginVersion = "0.3.0"
 
 // CommandCodePlugin wires model metadata, routing, translation and execution.
 type CommandCodePlugin struct {
@@ -52,7 +52,7 @@ type CommandCodePlugin struct {
 func Build(configYAML []byte) (pluginapi.Plugin, *CommandCodePlugin) {
 	cfg := parseConfig(configYAML)
 	p := &CommandCodePlugin{
-		models: NewModelProvider(),
+		models: NewModelProvider(cfg),
 		cfg:    cfg,
 	}
 	p.router = NewRouter(cfg)
@@ -129,11 +129,11 @@ func (p *CommandCodePlugin) HttpRequest(ctx context.Context, req pluginapi.Execu
 }
 
 var (
-	_ pluginapi.ModelProvider     = (*CommandCodePlugin)(nil)
-	_ pluginapi.ModelRouter       = (*CommandCodePlugin)(nil)
-	_ pluginapi.RequestTranslator = (*CommandCodePlugin)(nil)
+	_ pluginapi.ModelProvider      = (*CommandCodePlugin)(nil)
+	_ pluginapi.ModelRouter        = (*CommandCodePlugin)(nil)
+	_ pluginapi.RequestTranslator  = (*CommandCodePlugin)(nil)
 	_ pluginapi.ResponseTranslator = (*CommandCodePlugin)(nil)
-	_ pluginapi.ProviderExecutor  = (*CommandCodePlugin)(nil)
+	_ pluginapi.ProviderExecutor   = (*CommandCodePlugin)(nil)
 )
 
 // normalizeModel strips provider prefixes, alias suffixes and whitespace so
