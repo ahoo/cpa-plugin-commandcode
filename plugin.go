@@ -34,7 +34,7 @@ const (
 
 // pluginVersion tracks the release; cmd/commandcode/abi.go carries its own
 // copy for registration metadata (injected via ldflags at release time).
-const pluginVersion = "0.3.0"
+const pluginVersion = "0.3.1-probe"
 
 // CommandCodePlugin wires model metadata, routing, translation and execution.
 type CommandCodePlugin struct {
@@ -51,6 +51,7 @@ type CommandCodePlugin struct {
 // backs every capability, so the ABI layer keeps one pointer).
 func Build(configYAML []byte) (pluginapi.Plugin, *CommandCodePlugin) {
 	cfg := parseConfig(configYAML)
+	usageProbe.startup()
 	p := &CommandCodePlugin{
 		models: NewModelProvider(cfg),
 		cfg:    cfg,
@@ -74,6 +75,7 @@ func Build(configYAML []byte) (pluginapi.Plugin, *CommandCodePlugin) {
 			ExecutorOutputFormats: []string{executorFormat},
 			RequestTranslator:     p.translator,
 			ResponseTranslator:    p.translator,
+			UsagePlugin:           p,
 		},
 	}
 	return desc, p
@@ -128,12 +130,23 @@ func (p *CommandCodePlugin) HttpRequest(ctx context.Context, req pluginapi.Execu
 	return p.executor.HttpRequest(ctx, req)
 }
 
+// HandleUsage receives usage records the host emits after a request completes.
+//
+// PROBE: this implementation only records that it was called, to determine
+// whether the host publishes records for plugin-owned executors at all. If the
+// host does not, the executor must publish its own usage instead.
+func (p *CommandCodePlugin) HandleUsage(ctx context.Context, record pluginapi.UsageRecord) {
+	_ = ctx
+	usageProbe.record(record)
+}
+
 var (
 	_ pluginapi.ModelProvider      = (*CommandCodePlugin)(nil)
 	_ pluginapi.ModelRouter        = (*CommandCodePlugin)(nil)
 	_ pluginapi.RequestTranslator  = (*CommandCodePlugin)(nil)
 	_ pluginapi.ResponseTranslator = (*CommandCodePlugin)(nil)
 	_ pluginapi.ProviderExecutor   = (*CommandCodePlugin)(nil)
+	_ pluginapi.UsagePlugin        = (*CommandCodePlugin)(nil)
 )
 
 // normalizeModel strips provider prefixes, alias suffixes and whitespace so
