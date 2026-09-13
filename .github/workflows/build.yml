@@ -92,7 +92,7 @@ jobs:
           mkdir -p dist
           CGO_ENABLED=1 GOOS=${{ matrix.goos }} GOARCH=${{ matrix.goarch }} \
             go build -trimpath -buildmode=c-shared \
-              -ldflags "-s -w -X main.pluginVersion=${VERSION}" \
+              -ldflags "-s -w -X main.pluginVersion=${VERSION} -X github.com/ahoo/cpa-plugin-commandcode.pluginVersion=${VERSION}" \
               -o "dist/${LIB_NAME}" ./cmd/commandcode
           rm -f "dist/${PLUGIN_ID}.h"
 
