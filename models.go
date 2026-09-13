@@ -24,6 +24,9 @@ type ModelProvider struct{ cfg *pluginConfig }
 func NewModelProvider(cfg *pluginConfig) *ModelProvider { return &ModelProvider{cfg: cfg} }
 
 func (m ModelEntry) registryID() string {
+	if m.ID != "" {
+		return m.ID
+	}
 	name := strings.TrimSpace(m.Name)
 	if name == "" {
 		name = strings.TrimSpace(m.Alias)
@@ -41,6 +44,9 @@ func (c *pluginConfig) validateModels() error {
 	seen := map[string]bool{}
 	for _, entry := range c.effectiveModels() {
 		id := entry.registryID()
+		if entry.ID != "" && (!strings.HasPrefix(id, Provider+"/") || strings.TrimSpace(strings.TrimPrefix(id, Provider+"/")) == "" || strings.TrimSpace(id) != id || strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Name) != entry.Name) {
+			return fmt.Errorf("invalid explicit CommandCode model identity %q", id)
+		}
 		if id == "" || seen[strings.ToLower(id)] {
 			return fmt.Errorf("invalid or duplicate CommandCode model %q", id)
 		}

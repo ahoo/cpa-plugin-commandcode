@@ -187,3 +187,13 @@ nonnegative; zero means unspecified. `thinking` also accepts `min`, `max`,
 Only `chat-completions` (or an omitted protocol) is supported by this executor.
 Invalid metadata and duplicate registry IDs cause discovery to fail and routing
 to decline the configuration.
+
+An optional `id: commandcode/custom` on a structured entry registers and routes
+that exact public ID to its literal `name`. The ID must have a nonempty
+`commandcode/` prefix and `name` must be present. Explicit IDs do not claim the
+bare alias or matching names under other providers; entries without `id` retain
+the existing prefix-insensitive alias behavior. Matching is case-insensitive.
+Known CPA thinking suffixes, such as `(high)` or `(8192)`, are removed only for
+public-route lookup. A configured literal ID takes precedence, and upstream
+`name` values are always forwarded unchanged.
+This controls model routing, not account authorization or credential isolation.

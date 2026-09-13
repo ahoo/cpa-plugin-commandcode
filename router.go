@@ -22,6 +22,15 @@ func (r *Router) owned(req pluginapi.ModelRouteRequest) bool {
 		return false
 	}
 	r.cfg.ensureIndexes()
+	candidate := req.RequestedModel
+	if candidate == "" {
+		candidate = modelFromBody(req.Body)
+	}
+	if r.cfg != nil {
+		if _, ok := r.cfg.exactUpstreamName(candidate); ok {
+			return true
+		}
+	}
 	set := r.cfg.modelSet()
 	for _, candidate := range []string{req.RequestedModel, modelFromBody(req.Body)} {
 		if candidate == "" {
