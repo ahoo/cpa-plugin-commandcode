@@ -158,3 +158,32 @@ propagation, alias→upstream model mapping, and router ownership.
 ## License
 
 MIT
+
+### Per-model capabilities
+
+Structured `models` entries may declare metadata from the provider's documented
+model definition. The plugin does not infer another model's limits or reasoning
+levels when these fields are omitted. Existing bare strings and alias/name
+mappings still work, but no longer advertise blanket thinking or text-only
+capabilities without evidence.
+
+```yaml
+models:
+  - name: vendor/example-model
+    alias: example
+    display_name: Example model
+    protocol: chat-completions
+    context_length: 98304
+    max_output_tokens: 12345
+    input_modalities: [text, image]
+    output_modalities: [text]
+    thinking:
+      levels: [low, high]
+```
+
+These values are illustrative, not a model recommendation. Limits must be
+nonnegative; zero means unspecified. `thinking` also accepts `min`, `max`,
+`zero_allowed` and `dynamic_allowed`. Omit it when support is unknown.
+Only `chat-completions` (or an omitted protocol) is supported by this executor.
+Invalid metadata and duplicate registry IDs cause discovery to fail and routing
+to decline the configuration.

@@ -28,8 +28,9 @@ type pluginConfig struct {
 	APIKeys []APIKeyEntry `yaml:"api_keys"`
 
 	// Derived from Models at parse time (see buildIndexes). Not YAML fields.
-	claimed  map[string]struct{}
-	rewrites map[string]string
+	configErr error
+	claimed   map[string]struct{}
+	rewrites  map[string]string
 }
 
 // ModelEntry maps a client-facing alias to the name the vendor serves, using
@@ -50,7 +51,13 @@ type ModelEntry struct {
 	Name string `yaml:"name"`
 	// DisplayName is the optional label for model registration; falls back to
 	// Name, then Alias.
-	DisplayName string `yaml:"display_name"`
+	DisplayName      string         `yaml:"display_name"`
+	Protocol         string         `yaml:"protocol"`
+	ContextLength    int64          `yaml:"context_length"`
+	MaxOutputTokens  int64          `yaml:"max_output_tokens"`
+	InputModalities  []string       `yaml:"input_modalities"`
+	OutputModalities []string       `yaml:"output_modalities"`
+	Thinking         *ModelThinking `yaml:"thinking"`
 }
 
 // UnmarshalYAML accepts both the structured mapping and the legacy bare string
@@ -121,7 +128,7 @@ func parseConfig(raw []byte) *pluginConfig {
 		cfg.buildIndexes()
 		return cfg
 	}
-	_ = yaml.Unmarshal(raw, cfg)
+	cfg.configErr = yaml.Unmarshal(raw, cfg)
 	cfg.buildIndexes()
 	return cfg
 }
