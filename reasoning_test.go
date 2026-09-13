@@ -74,7 +74,8 @@ func gjsonGetStringNested(out []byte) string {
 }
 
 func TestNormalizeStreamLine(t *testing.T) {
-	// bare-JSON contract: host adds "data: " framing downstream.
+	// Protocol normalization always returns bare JSON. convertChunks applies
+	// route-specific framing later.
 	if got := string(normalizeStreamLine([]byte("data: data: {\"a\":1}\n"))); got != "{\"a\":1}" {
 		t.Fatalf("line normalize: %q", got)
 	}

@@ -65,9 +65,9 @@ import (
 	plug "github.com/ahoo/cpa-plugin-commandcode"
 )
 
-// pluginVersion is overridden at release build time:
-// go build -ldflags "-X main.pluginVersion=0.3.0"
-var pluginVersion = "0.3.0"
+// pluginVersion is overridden at release build time. build.sh also injects
+// the library package's descriptor version with the same value.
+var pluginVersion = "0.3.2"
 
 var abiState = struct {
 	sync.RWMutex

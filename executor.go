@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"strings"
 
+	coreexecutor "github.com/router-for-me/CLIProxyAPI/v7/sdk/cliproxy/executor"
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 	"github.com/tidwall/sjson"
 )
@@ -45,6 +46,33 @@ func apiKey(cfg *pluginConfig, req pluginapi.ExecutorRequest) string {
 }
 
 const missingKeyMsg = "commandcode executor: missing api key (router path passes nil auth; set plugins.configs.commandcode.api_key or api_keys in config.yaml)"
+
+const claudeMessagesPath = "/v1/messages"
+
+type streamFramingPolicy uint8
+
+const (
+	streamFramingBare streamFramingPolicy = iota
+	streamFramingClaude
+)
+
+func streamFramingForRequest(req pluginapi.ExecutorRequest) streamFramingPolicy {
+	path, ok := req.Metadata[coreexecutor.RequestPathMetadataKey].(string)
+	if ok && path == claudeMessagesPath {
+		return streamFramingClaude
+	}
+	return streamFramingBare
+}
+
+func (p streamFramingPolicy) apply(payload []byte) []byte {
+	if p != streamFramingClaude {
+		return payload
+	}
+	framed := make([]byte, 0, len("data: ")+len(payload))
+	framed = append(framed, "data: "...)
+	framed = append(framed, payload...)
+	return framed
+}
 
 func (e *Executor) endpoint() string {
 	return strings.TrimSuffix(e.cfg.baseURL(), "/") + "/chat/completions"
@@ -137,12 +165,14 @@ func (e *Executor) Execute(ctx context.Context, req pluginapi.ExecutorRequest) (
 	return pluginapi.ExecutorResponse{}, statusError{statusCode: http.StatusBadGateway, msg: "commandcode executor: all pool members failed"}
 }
 
-// ExecuteStream performs a streaming chat completion, normalizing each SSE
-// line into bare JSON before handing chunks back (the host adds "data: "
-// framing downstream). Failover applies only before the first upstream byte:
-// once a 2xx stream is established, mid-stream errors propagate (already
-// delivered bytes cannot be rolled back).
+// ExecuteStream performs a streaming chat completion. Normalized chunks stay
+// bare for OpenAI routes; /v1/messages receives one data: prefix because the
+// host's OpenAI-to-Claude translator consumes SSE-framed input. Failover
+// applies only before the first upstream byte: once a 2xx stream is
+// established, mid-stream errors propagate (already delivered bytes cannot be
+// rolled back).
 func (e *Executor) ExecuteStream(ctx context.Context, req pluginapi.ExecutorRequest) (pluginapi.ExecutorStreamResponse, error) {
+	framing := streamFramingForRequest(req)
 	members := e.cfg.members(req)
 	if len(members) == 0 {
 		return pluginapi.ExecutorStreamResponse{}, statusError{statusCode: http.StatusUnauthorized, msg: missingKeyMsg}
@@ -171,7 +201,7 @@ func (e *Executor) ExecuteStream(ctx context.Context, req pluginapi.ExecutorRequ
 			}
 			return pluginapi.ExecutorStreamResponse{}, lastErr
 		}
-		return pluginapi.ExecutorStreamResponse{Headers: headers, Chunks: convertChunks(ctx, chunks)}, nil
+		return pluginapi.ExecutorStreamResponse{Headers: headers, Chunks: convertChunks(ctx, chunks, framing)}, nil
 	}
 	if lastErr != nil {
 		return pluginapi.ExecutorStreamResponse{}, lastErr
@@ -180,26 +210,42 @@ func (e *Executor) ExecuteStream(ctx context.Context, req pluginapi.ExecutorRequ
 }
 
 // convertChunks normalizes each upstream SSE data payload (reasoning
-// backfill) and re-wraps it as an executor chunk.
+// backfill) and applies the route-specific executor framing policy.
 //
-// Framing contract (verified live): the host adds the "data: " prefix when
-// delivering executor chunks downstream, so chunks MUST be bare JSON without
-// any SSE framing. Empty lines are dropped, the upstream [DONE] is swallowed
-// (the host emits its own stream tail).
+// OpenAI chat and Responses routes stay bare because their downstream paths
+// accept or add SSE framing. Claude Messages receives one data: prefix for the
+// host's OpenAI-to-Claude translator. Empty lines are dropped, and upstream
+// [DONE] is swallowed because the host emits its own stream tail.
 //
 // The host delivers arbitrary 32KB raw reads, so one SSE line can straddle
 // two chunks. We buffer until a newline completes the line; only complete
 // lines go through normalizeStreamLine. The tail remainder is flushed when
 // the upstream closes.
-func convertChunks(ctx context.Context, in <-chan pluginapi.HTTPStreamChunk) <-chan pluginapi.ExecutorStreamChunk {
-	out := make(chan pluginapi.ExecutorStreamChunk)
+func convertChunks(ctx context.Context, in <-chan pluginapi.HTTPStreamChunk, framing streamFramingPolicy) <-chan pluginapi.ExecutorStreamChunk {
+	// One slot lets a terminal cancellation error be reported even when the
+	// caller stops draining the stream at the same time.
+	out := make(chan pluginapi.ExecutorStreamChunk, 1)
 	go func() {
 		defer close(out)
 		var pending []byte
+		emitError := func(err error) {
+			terminal := pluginapi.ExecutorStreamChunk{Err: err}
+			select {
+			case out <- terminal:
+			case <-ctx.Done():
+				// If a payload already occupies the slot, cancellation must still
+				// let this goroutine terminate rather than block on error delivery.
+				select {
+				case out <- terminal:
+				default:
+				}
+			}
+		}
 		emit := func(payload []byte) bool {
 			if len(bytes.TrimSpace(payload)) == 0 {
 				return true
 			}
+			payload = framing.apply(payload)
 			select {
 			case <-ctx.Done():
 				return false
@@ -210,7 +256,7 @@ func convertChunks(ctx context.Context, in <-chan pluginapi.HTTPStreamChunk) <-c
 		for {
 			select {
 			case <-ctx.Done():
-				out <- pluginapi.ExecutorStreamChunk{Err: ctx.Err()}
+				emitError(ctx.Err())
 				return
 			case chunk, ok := <-in:
 				if !ok {
@@ -220,7 +266,7 @@ func convertChunks(ctx context.Context, in <-chan pluginapi.HTTPStreamChunk) <-c
 					return
 				}
 				if chunk.Err != nil {
-					out <- pluginapi.ExecutorStreamChunk{Err: chunk.Err}
+					emitError(chunk.Err)
 					return
 				}
 				pending = append(pending, chunk.Payload...)
@@ -248,10 +294,10 @@ func convertChunks(ctx context.Context, in <-chan pluginapi.HTTPStreamChunk) <-c
 	return out
 }
 
-// normalizeStreamLine converts one complete upstream SSE line into the bare
-// JSON payload the host expects (host adds "data: " framing downstream).
-// Stacked prefixes are collapsed, reasoning_content is backfilled, empty
-// lines and [DONE] yield nil (dropped; host owns stream termination).
+// normalizeStreamLine converts one complete upstream SSE line into a bare
+// JSON payload. Stacked prefixes are collapsed, reasoning_content is
+// backfilled, and empty lines and [DONE] yield nil. Route-specific framing is
+// applied later by convertChunks.
 func normalizeStreamLine(line []byte) []byte {
 	trimmed := bytes.TrimSpace(line)
 	if !bytes.HasPrefix(trimmed, []byte("data:")) {
