@@ -7,8 +7,9 @@
 // the upstream response back into the standard OpenAI shape the host
 // understands: commandcode returns reasoning under "reasoning" (string)
 // and "reasoning_details[].text" but never "reasoning_content", which the
-// host's openai->claude translator is blind to. Mapping here fixes the
-// missing thinking block on /v1/messages without touching host code.
+// host's openai->claude translator is blind to. Mapping that field and applying
+// the translator's required stream framing here fixes missing thinking blocks
+// on /v1/messages without touching host code.
 package plugin
 
 import (
@@ -23,9 +24,10 @@ const (
 	// any built-in provider key; native executors always win on collision.
 	Provider = "commandcode"
 
-	// executorFormat declares what this executor consumes and emits.
-	// Both are OpenAI chat-completions JSON; the host translates to/from
-	// claude/openai-responses/gemini/codex around us.
+	// executorFormat declares the semantic payload this executor consumes and
+	// emits. Both are OpenAI chat-completions JSON; the host translates to/from
+	// claude/openai-responses/gemini/codex around us. Streaming /v1/messages
+	// receives the SSE transport prefix required by the host translator.
 	executorFormat = "openai"
 
 	// upstreamBaseURL is the commandcode OpenAI-compatible endpoint root.
@@ -34,7 +36,7 @@ const (
 
 // pluginVersion tracks the release; cmd/commandcode/abi.go carries its own
 // copy for registration metadata (injected via ldflags at release time).
-const pluginVersion = "0.3.1-probe"
+var pluginVersion = "0.3.2"
 
 // CommandCodePlugin wires model metadata, routing, translation and execution.
 type CommandCodePlugin struct {
