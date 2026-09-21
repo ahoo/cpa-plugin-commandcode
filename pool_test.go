@@ -117,3 +117,21 @@ func (stubHostClient) Do(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTP
 func (stubHostClient) DoStream(context.Context, pluginapi.HTTPRequest) (pluginapi.HTTPStreamResponse, error) {
 	return pluginapi.HTTPStreamResponse{}, fmt.Errorf("stub")
 }
+
+func TestMembersDisabledSkipped(t *testing.T) {
+	cfg := parseConfig([]byte("api_keys:\n  - key: user_A\n    weight: 10\n  - key: user_B\n    disabled: true\n  - key: user_C\n"))
+	ms := cfg.members(pluginapi.ExecutorRequest{})
+	if len(ms) != 2 || ms[0].Key != "user_A" || ms[1].Key != "user_C" {
+		t.Fatalf("disabled member not skipped: %+v", ms)
+	}
+}
+
+func TestMembersAllDisabledFailsClosed(t *testing.T) {
+	cfg := &pluginConfig{
+		APIKey:  "user_LEGACY",
+		APIKeys: []APIKeyEntry{{Key: "user_A", Disabled: true}},
+	}
+	if ms := cfg.members(pluginapi.ExecutorRequest{}); ms != nil {
+		t.Fatalf("all-disabled pool should yield nil, got %+v", ms)
+	}
+}
