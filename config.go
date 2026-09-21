@@ -80,11 +80,15 @@ func (m ModelEntry) label() string {
 	return strings.TrimSpace(m.Alias)
 }
 
-// APIKeyEntry is one pool member: key + weight + optional per-key proxy.
+// APIKeyEntry is one pool member: key + weight + optional per-key proxy and
+// kill switch. Disabled members are excluded from selection without deleting
+// them from the configuration (hot-toggled via reconfigure, no restart of
+// the plugin build needed).
 type APIKeyEntry struct {
 	Key      string `yaml:"key"`
 	Weight   int    `yaml:"weight"`
 	ProxyURL string `yaml:"proxy_url"`
+	Disabled bool   `yaml:"disabled"`
 }
 
 func (en APIKeyEntry) normWeight() int {

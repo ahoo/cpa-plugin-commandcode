@@ -43,14 +43,24 @@ func poolReqFromHTTP(req pluginapi.ExecutorHTTPRequest) pluginapi.ExecutorReques
 func (c *pluginConfig) members(req pluginapi.ExecutorRequest) []APIKeyEntry {
 	if c != nil && len(c.APIKeys) > 0 {
 		out := make([]APIKeyEntry, 0, len(c.APIKeys))
+		defined := false
 		for _, en := range c.APIKeys {
 			if strings.TrimSpace(en.Key) == "" {
+				continue
+			}
+			defined = true
+			if en.Disabled {
 				continue
 			}
 			out = append(out, en)
 		}
 		if len(out) > 0 {
 			return out
+		}
+		if defined {
+			// Every defined member is disabled: fail closed instead of
+			// silently falling back to the legacy key or request auth.
+			return nil
 		}
 	}
 	if c != nil && strings.TrimSpace(c.APIKey) != "" {
