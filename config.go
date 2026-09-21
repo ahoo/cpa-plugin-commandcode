@@ -1,6 +1,7 @@
 package plugin
 
 import (
+	"strconv"
 	"strings"
 
 	"gopkg.in/yaml.v3"
@@ -28,8 +29,10 @@ type pluginConfig struct {
 	APIKeys []APIKeyEntry `yaml:"api_keys"`
 
 	// Derived from Models at parse time (see buildIndexes). Not YAML fields.
-	claimed  map[string]struct{}
-	rewrites map[string]string
+	configErr   error
+	claimed     map[string]struct{}
+	rewrites    map[string]string
+	exactRoutes map[string]string
 }
 
 // ModelEntry maps a client-facing alias to the name the vendor serves, using
@@ -44,13 +47,21 @@ type pluginConfig struct {
 // rejects a bare alias. Leaving Name empty forwards the client's name verbatim,
 // which is only correct for aliases the host itself resolves.
 type ModelEntry struct {
+	// ID opts into an exact registry route instead of prefix-insensitive aliases.
+	ID string `yaml:"id"`
 	// Alias is the client-facing name, e.g. "deepseek-flash".
 	Alias string `yaml:"alias"`
 	// Name is the model name sent upstream. Empty forwards Alias unchanged.
 	Name string `yaml:"name"`
 	// DisplayName is the optional label for model registration; falls back to
 	// Name, then Alias.
-	DisplayName string `yaml:"display_name"`
+	DisplayName      string         `yaml:"display_name"`
+	Protocol         string         `yaml:"protocol"`
+	ContextLength    int64          `yaml:"context_length"`
+	MaxOutputTokens  int64          `yaml:"max_output_tokens"`
+	InputModalities  []string       `yaml:"input_modalities"`
+	OutputModalities []string       `yaml:"output_modalities"`
+	Thinking         *ModelThinking `yaml:"thinking"`
 }
 
 // UnmarshalYAML accepts both the structured mapping and the legacy bare string
@@ -125,7 +136,7 @@ func parseConfig(raw []byte) *pluginConfig {
 		cfg.buildIndexes()
 		return cfg
 	}
-	_ = yaml.Unmarshal(raw, cfg)
+	cfg.configErr = yaml.Unmarshal(raw, cfg)
 	cfg.buildIndexes()
 	return cfg
 }
@@ -151,7 +162,12 @@ func (c *pluginConfig) buildIndexes() {
 	entries := c.effectiveModels()
 	c.claimed = make(map[string]struct{}, len(entries)*2)
 	c.rewrites = make(map[string]string, len(entries)*2)
+	c.exactRoutes = make(map[string]string)
 	for _, entry := range entries {
+		if entry.ID != "" {
+			c.exactRoutes[strings.ToLower(entry.ID)] = entry.Name
+			continue
+		}
 		alias := normalizeModel(entry.Alias)
 		name := strings.TrimSpace(entry.Name)
 		if alias != "" {
@@ -200,10 +216,41 @@ func (c *pluginConfig) modelSet() map[string]struct{} {
 // An empty result means "do not rewrite": the request keeps the client's name,
 // which is only correct for aliases the host resolves itself.
 func (c *pluginConfig) upstreamName(model string) string {
-	if c == nil || len(c.rewrites) == 0 {
+	if c == nil {
 		return ""
 	}
+	if name, ok := c.exactUpstreamName(model); ok {
+		return name
+	}
 	return c.rewrites[normalizeModel(model)]
+}
+
+// exactUpstreamName resolves the public route, including CPA's terminal thinking
+// suffix syntax. Configured vendor names and provider namespaces stay literal.
+func (c *pluginConfig) exactUpstreamName(model string) (string, bool) {
+	if c == nil {
+		return "", false
+	}
+	model = strings.ToLower(strings.TrimSpace(model))
+	// A configured literal ID wins even when it itself ends in parentheses.
+	if name, ok := c.exactRoutes[model]; ok {
+		return name, true
+	}
+	open := strings.LastIndex(model, "(")
+	if open < 0 || !strings.HasSuffix(model, ")") {
+		return "", false
+	}
+	suffix := model[open+1 : len(model)-1]
+	switch suffix {
+	case "none", "auto", "-1", "minimal", "low", "medium", "high", "xhigh", "max":
+	default:
+		budget, err := strconv.Atoi(suffix)
+		if err != nil || budget < 0 {
+			return "", false
+		}
+	}
+	name, ok := c.exactRoutes[strings.TrimSpace(model[:open])]
+	return name, ok
 }
 
 func (c *pluginConfig) baseURL() string {

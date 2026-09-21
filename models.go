@@ -2,86 +2,96 @@ package plugin
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/router-for-me/CLIProxyAPI/v7/sdk/pluginapi"
 )
 
-// ModelProvider contributes the commandcode model list to the host registry.
-// The ABI only offers static + per-auth discovery (no live /v1/models crawl:
-// StaticModels has no HTTPClient), so the list is derived from the same
-// configuration that drives routing, keeping the two in step automatically.
-type ModelProvider struct {
-	cfg *pluginConfig
+// ModelThinking describes evidenced, model-specific reasoning controls.
+// A nil value leaves reasoning support unknown rather than advertising every level.
+type ModelThinking struct {
+	Min            int      `yaml:"min"`
+	Max            int      `yaml:"max"`
+	ZeroAllowed    bool     `yaml:"zero_allowed"`
+	DynamicAllowed bool     `yaml:"dynamic_allowed"`
+	Levels         []string `yaml:"levels"`
 }
+
+// ModelProvider derives metadata from the same entries that drive routing.
+type ModelProvider struct{ cfg *pluginConfig }
 
 func NewModelProvider(cfg *pluginConfig) *ModelProvider { return &ModelProvider{cfg: cfg} }
 
-// modelDef is the registry-facing shape of one claimed model.
-type modelDef struct {
-	id          string
-	displayName string
+func (m ModelEntry) registryID() string {
+	if m.ID != "" {
+		return m.ID
+	}
+	name := strings.TrimSpace(m.Name)
+	if name == "" {
+		name = strings.TrimSpace(m.Alias)
+	}
+	if name == "" {
+		return ""
+	}
+	return Provider + "/" + name
 }
 
-// registryModels builds the advertised list from configuration.
-//
-// NOTE: IDs use the commandcode/ namespace deliberately. The host's native
-// openai-compatibility channel (cmd-订阅) already registers the bare upstream
-// names; RegisterExecutors skips plugin models that any native executor serves
-// (modelHasNativeExecutor), so reusing those IDs would leave this executor
-// permanently unregistered. The router matches client aliases to this
-// executor, so clients keep requesting deepseek-flash unchanged.
-func (p *ModelProvider) registryModels() []modelDef {
-	entries := p.cfg.effectiveModels()
-	defs := make([]modelDef, 0, len(entries))
-	for _, entry := range entries {
-		// Prefer the upstream name for the ID: it is the name the vendor
-		// actually serves, so the advertised model stays meaningful across
-		// alias changes. Fall back to the alias when no upstream is declared.
-		name := strings.TrimSpace(entry.Name)
-		if name == "" {
-			name = strings.TrimSpace(entry.Alias)
-		}
-		if name == "" {
-			continue
-		}
-		defs = append(defs, modelDef{
-			id:          Provider + "/" + name,
-			displayName: entry.label() + " via CommandCode",
-		})
+func (c *pluginConfig) validateModels() error {
+	if c != nil && c.configErr != nil {
+		return fmt.Errorf("invalid CommandCode configuration")
 	}
-	return defs
+	seen := map[string]bool{}
+	for _, entry := range c.effectiveModels() {
+		id := entry.registryID()
+		if entry.ID != "" && (!strings.HasPrefix(id, Provider+"/") || strings.TrimSpace(strings.TrimPrefix(id, Provider+"/")) == "" || strings.TrimSpace(id) != id || strings.TrimSpace(entry.Name) == "" || strings.TrimSpace(entry.Name) != entry.Name) {
+			return fmt.Errorf("invalid explicit CommandCode model identity %q", id)
+		}
+		if id == "" || seen[strings.ToLower(id)] {
+			return fmt.Errorf("invalid or duplicate CommandCode model %q", id)
+		}
+		seen[strings.ToLower(id)] = true
+		if entry.Protocol != "" && entry.Protocol != "chat-completions" {
+			return fmt.Errorf("CommandCode model %q uses unsupported protocol %q", id, entry.Protocol)
+		}
+		if entry.ContextLength < 0 || entry.MaxOutputTokens < 0 {
+			return fmt.Errorf("negative limit for CommandCode model %q", id)
+		}
+	}
+	return nil
 }
 
 func (p *ModelProvider) StaticModels(context.Context, pluginapi.StaticModelRequest) (pluginapi.ModelResponse, error) {
+	if err := p.cfg.validateModels(); err != nil {
+		return pluginapi.ModelResponse{}, err
+	}
 	return pluginapi.ModelResponse{Provider: Provider, Models: p.models()}, nil
 }
 
-func (p *ModelProvider) ModelsForAuth(context.Context, pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
-	return pluginapi.ModelResponse{Provider: Provider, Models: p.models()}, nil
+func (p *ModelProvider) ModelsForAuth(ctx context.Context, _ pluginapi.AuthModelRequest) (pluginapi.ModelResponse, error) {
+	return p.StaticModels(ctx, pluginapi.StaticModelRequest{})
 }
 
 func (p *ModelProvider) models() []pluginapi.ModelInfo {
-	defs := p.registryModels()
-	models := make([]pluginapi.ModelInfo, 0, len(defs))
-	for _, def := range defs {
-		models = append(models, pluginapi.ModelInfo{
-			ID:                         def.id,
-			Object:                     "model",
-			OwnedBy:                    "commandcode",
-			Type:                       "chat",
-			DisplayName:                def.displayName,
-			Name:                       def.id,
-			Description:                def.displayName,
+	entries := p.cfg.effectiveModels()
+	models := make([]pluginapi.ModelInfo, 0, len(entries))
+	for _, entry := range entries {
+		id := entry.registryID()
+		label := entry.label() + " via CommandCode"
+		model := pluginapi.ModelInfo{
+			ID: id, Object: "model", OwnedBy: Provider, Type: "chat",
+			DisplayName: label, Name: id, Description: label,
+			ContextLength: entry.ContextLength, MaxCompletionTokens: entry.MaxOutputTokens,
 			SupportedGenerationMethods: []string{"chatCompletions"},
-			SupportedInputModalities:   []string{"text"},
-			SupportedOutputModalities:  []string{"text"},
-			SupportedParameters:        []string{"temperature", "top_p", "max_tokens", "stop", "tools", "reasoning_effort"},
-			Thinking: &pluginapi.ThinkingSupport{
-				DynamicAllowed: true,
-				Levels:         []string{"none", "auto", "low", "medium", "high", "max"},
-			},
-		})
+			SupportedInputModalities:   append([]string(nil), entry.InputModalities...),
+			SupportedOutputModalities:  append([]string(nil), entry.OutputModalities...),
+			SupportedParameters:        []string{"temperature", "top_p", "max_tokens", "stop", "tools"},
+		}
+		if t := entry.Thinking; t != nil {
+			model.Thinking = &pluginapi.ThinkingSupport{Min: t.Min, Max: t.Max, ZeroAllowed: t.ZeroAllowed, DynamicAllowed: t.DynamicAllowed, Levels: append([]string(nil), t.Levels...)}
+			model.SupportedParameters = append(model.SupportedParameters, "reasoning_effort")
+		}
+		models = append(models, model)
 	}
 	return models
 }
